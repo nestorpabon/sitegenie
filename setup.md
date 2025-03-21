@@ -1,116 +1,268 @@
-Create a swam of agents, each with the expertise needed to create this application.
+# SiteGenie Setup Guide
 
-Here are the agents this application should have:
+This document provides detailed instructions for setting up SiteGenie in both development and production environments. SiteGenie uses Docker for containerization, ensuring consistent environments across different systems.
 
-Agent #1: On-Page SEO:
+## Prerequisites
 
-Keyword research and analysis
-Meta tags optimization (titles, descriptions, headers)
-Content optimization (including blog posts, product descriptions, and landing pages)
-Internal linking strategies
-URL structure optimization
-Image optimization (alt tags, file names, compression)
+Before setting up SiteGenie, ensure you have the following installed:
 
-Agent #2: Off-Page SEO:
+- [Docker](https://docs.docker.com/get-docker/) (version 20.10 or higher)
+- [Docker Compose](https://docs.docker.com/compose/install/) (version 2.0 or higher)
+- [Git](https://git-scm.com/downloads) (version 2.25 or higher)
+- [Node.js](https://nodejs.org/) (version 16 or higher, for local development only)
+- [npm](https://www.npmjs.com/) (version 8 or higher, for local development only)
 
-Link building strategies (guest blogging, influencer outreach, etc.)
-Social media marketing and integration
-Directory submissions and citations
-Brand mentions and reputation management
-Backlink analysis and cleanup
+## Clone the Repository
 
-Agent #3:Technical SEO:
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/SiteGenie.git
 
-Website speed optimization
-Mobile-friendliness and responsive design
-XML sitemap creation and submission
-Robots.txt file optimization
-Structured data markup (schema.org)
-Fixing crawl errors and broken links
-HTTPS implementation and security
+# Navigate to the project directory
+cd SiteGenie
+```
 
-Agent #4: Content Marketing:
+## Directory Structure Setup
 
-Content strategy development
-Blogging and article writing
-Video content creation and optimization
-Infographics and visual content
-Content distribution and promotion
+Create the necessary directories for Docker volumes:
 
-Agent #5: Local SEO:
+```bash
+mkdir -p ./data/db
+mkdir -p ./data/logs
+mkdir -p ./config
+```
 
-Google My Business optimization
-Local citations and directory listings
-Localized content creation
-Reviews and ratings management
-Local link building
+## Environment Configuration
 
-Agent #6: E-commerce SEO:
+1. Create a `.env` file in the root directory:
 
-Product page optimization
-Category page optimization
-Shopping feed optimization
-User experience (UX) improvements
-Conversion rate optimization (CRO)
+```bash
+cp .env.example .env
+```
 
-Agent #7: Analytics and Reporting:
+2. Open the `.env` file and configure the following variables:
 
-Google Analytics setup and configuration
-Google Search Console setup and monitoring
-Regular performance reporting
-Competitor analysis
-ROI tracking and analysis
+```
+# App Configuration
+NODE_ENV=development
+PORT=3000
 
-Agent #8: SEO Audits:
+# Database Configuration
+DB_HOST=mongodb
+DB_PORT=27017
+DB_NAME=sitegenie
+DB_USER=sitegenieuser
+DB_PASS=your_secure_password
 
-Comprehensive website audits
-Competitor analysis
-Identification of technical issues
-Content gap analysis
-Backlink profile analysis
+# API Keys
+OPENAI_API_KEY=your_openai_api_key
+GOOGLE_API_KEY=your_google_api_key
 
-Agent #9: User Experience (UX) and Conversion Rate Optimization (CRO):
+# Other Settings
+LOG_LEVEL=info
+ENABLE_AGENT_SWARM=true
+```
 
-Website usability improvements
-A/B testing and multivariate testing
-Heatmaps and user behavior analysis
-Call-to-action (CTA) optimization
+Adjust these values according to your specific requirements and API credentials.
 
-Agent #10: International SEO:
+## Docker Compose Configuration
 
-Hreflang tag implementation
-Geo-targeting and localization strategies
-Multilingual content creation
-International link building
+### Development Environment
 
-Agent #11: Voice Search Optimization:
+Create a `docker-compose.yml` file in the root directory:
 
-Optimizing for voice search queries
-FAQ schema implementation
-Local SEO for voice search
+```yaml
+version: '3.8'
 
-Agent #12: SEO Consulting and Strategy:
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: sitegenie-app
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    env_file:
+      - .env
+    depends_on:
+      - mongodb
 
-Custom SEO strategy development
-Ongoing SEO consulting and support
-Training and workshops for in-house teams
+  mongodb:
+    image: mongo:latest
+    container_name: sitegenie-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data/db:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${DB_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${DB_PASS}
+      - MONGO_INITDB_DATABASE=${DB_NAME}
 
-Agent #13: Reputation Management:
+networks:
+  default:
+    name: sitegenie-network
+```
 
-Monitoring online reviews and ratings
-Addressing negative feedback
-Promoting positive brand mentions
+### Production Environment
 
-Agent #14: Paid Search and PPC Integration:
+Create a `docker-compose.prod.yml` file:
 
-Syncing SEO with PPC campaigns
-Keyword research for paid search
-Landing page optimization for PPC
+```yaml
+version: '3.8'
 
-Agent #15: Emerging Trends and Technologies:
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: sitegenie-app-prod
+    restart: always
+    ports:
+      - "80:3000"
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env
+    depends_on:
+      - mongodb
 
-Staying updated with the latest SEO trends
-Implementing new technologies (e.g., AI, machine learning)
-Adapting to algorithm changes
+  mongodb:
+    image: mongo:latest
+    container_name: sitegenie-mongodb-prod
+    restart: always
+    volumes:
+      - ./data/db:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${DB_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${DB_PASS}
+      - MONGO_INITDB_DATABASE=${DB_NAME}
 
-This swarm of agents should provide a holistic approach, combining these fields to create a comprehensive strategy tailored to assist me.
+networks:
+  default:
+    name: sitegenie-network-prod
+```
+
+## Running SiteGenie
+
+### Development Environment
+
+Start the application in development mode:
+
+```bash
+docker-compose up
+```
+
+To run in detached mode (background):
+
+```bash
+docker-compose up -d
+```
+
+### Production Environment
+
+Start the application in production mode:
+
+```bash
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+## Stopping SiteGenie
+
+### Development Environment
+
+```bash
+docker-compose down
+```
+
+### Production Environment
+
+```bash
+docker-compose -f docker-compose.prod.yml down
+```
+
+## Viewing Logs
+
+To view logs for the running containers:
+
+### Development Environment
+
+```bash
+# View all logs
+docker-compose logs
+
+# Follow logs
+docker-compose logs -f
+
+# View logs for a specific service
+docker-compose logs app
+docker-compose logs mongodb
+```
+
+### Production Environment
+
+```bash
+# View all logs
+docker-compose -f docker-compose.prod.yml logs
+
+# Follow logs
+docker-compose -f docker-compose.prod.yml logs -f
+
+# View logs for a specific service
+docker-compose -f docker-compose.prod.yml logs app
+docker-compose -f docker-compose.prod.yml logs mongodb
+```
+
+## Testing
+
+Run the test suite:
+
+```bash
+docker-compose exec app npm test
+```
+
+## Rebuilding Containers
+
+If you make changes to the Dockerfile or need to rebuild the containers:
+
+```bash
+# Development
+docker-compose build
+
+# Production
+docker-compose -f docker-compose.prod.yml build
+```
+
+## Accessing the Application
+
+Once the application is running, you can access it at:
+
+- Development: http://localhost:3000
+- Production: http://your-server-ip (or your domain if configured)
+
+## Troubleshooting
+
+1. **Permission issues with mounted volumes:**
+   ```bash
+   sudo chown -R $USER:$USER ./data
+   ```
+
+2. **Port conflicts:**
+   If port 3000 or 27017 is already in use, modify the port mappings in the docker-compose files.
+
+3. **Container not starting:**
+   ```bash
+   docker-compose logs app
+   ```
+   Check the logs for any error messages.
+
+## Agent System
+
+SiteGenie uses a swarm of specialized AI agents to perform various SEO and website optimization tasks. Each agent has specific expertise in areas such as on-page SEO, content marketing, technical SEO, etc. The agent system is automatically configured when you start the application.
+
+For more information about SiteGenie's features and capabilities, refer to the [README.md](README.md) file.
