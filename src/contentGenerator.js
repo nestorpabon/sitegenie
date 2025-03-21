@@ -1,6 +1,7 @@
 const axios = require('axios');
 const logger = require('./utils/logger'); // Assuming a logger utility exists
 const { addToQueue } = require('./utils/queue'); // Assuming a queue utility exists
+const crypto = require('crypto'); // For generating Copyscape API signatures
 
 /**
  * Generates content using OpenAI GPT-4 based on the provided content brief
@@ -155,6 +156,98 @@ async function generateFallbackContent(contentBrief) {
 }
 
 /**
+ * Checks if content is plagiarized using the Copyscape API
+ * 
+ * @param {string} content - The content to check for plagiarism
+ * @returns {Promise<Object>} - Results of the plagiarism check
+ */
+async function checkPlagiarism(content) {
+  try {
+    logger.info('Checking content for plagiarism via Copyscape API');
+    
+    // Copyscape API credentials from environment variables
+    const username = process.env.COPYSCAPE_USERNAME;
+    const apiKey = process.env.COPYSCAPE_API_KEY;
+    
+    if (!username || !apiKey) {
+      logger.warn('Copyscape API credentials not configured, skipping plagiarism check');
+      return {
+        isPlagiarized: false,
+        similarityScore: 0,
+        status: 'skipped',
+        message: 'Plagiarism check skipped due to missing API credentials'
+      };
+    }
+    
+    // Prepare params for Copyscape API
+    const params = new URLSearchParams();
+    params.append('u', username);
+    params.append('k', apiKey);
+    params.append('o', 'csearch'); // Content search operation
+    params.append('e', 'UTF-8'); // Encoding
+    params.append('t', content);
+    params.append('f', 'json'); // Response format
+    
+    const response = await axios.post('https://www.copyscape.com/api/', params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+    
+    if (response.data.error) {
+      throw new Error(`Copyscape API error: ${response.data.error}`);
+    }
+    
+    // Process results
+    const results = response.data.result || [];
+    const totalMatches = results.length;
+    
+    // Calculate highest match percentage
+    let highestMatchPercentage = 0;
+    let matchedWords = 0;
+    let totalWords = content.split(/\s+/).length;
+    
+    for (const result of results) {
+      const wordsMatched = parseInt(result.wordsmatched, 10) || 0;
+      if (wordsMatched > matchedWords) {
+        matchedWords = wordsMatched;
+      }
+    }
+    
+    if (totalWords > 0 && matchedWords > 0) {
+      highestMatchPercentage = (matchedWords / totalWords) * 100;
+    }
+    
+    // Consider content plagiarized if similarity is >= 5%
+    const isPlagiarized = highestMatchPercentage >= 5;
+    
+    logger.info(`Plagiarism check complete. Match percentage: ${highestMatchPercentage.toFixed(2)}%. Matches found: ${totalMatches}`);
+    
+    return {
+      isPlagiarized,
+      similarityScore: parseFloat(highestMatchPercentage.toFixed(2)),
+      matchedWords,
+      totalWords,
+      totalMatches,
+      status: 'completed',
+      sources: results.map(r => ({
+        url: r.url,
+        title: r.title,
+        matchedWords: parseInt(r.wordsmatched, 10) || 0,
+        snippet: r.textsnippet
+      }))
+    };
+  } catch (error) {
+    logger.error('Plagiarism check failed:', error);
+    
+    return {
+      isPlagiarized: false, // Assume not plagiarized when check fails
+      status: 'error',
+      message: `Plagiarism check failed: ${error.message}`,
+      error: error.message
+    };
+  }
+}
+
+/**
  * Checks the generated content for quality and performs post-processing
  * 
  * @param {string} content - The raw generated content
@@ -200,24 +293,114 @@ function processContent(content, contentBrief) {
  * Main function to generate and process content based on a brief
  * 
  * @param {Object} contentBrief - The content brief
+ * @param {boolean} [skipPlagiarismCheck=false] - Whether to skip the plagiarism check
  * @returns {Promise<Object>} - The final processed content
  */
-async function createContent(contentBrief) {
+async function createContent(contentBrief, skipPlagiarismCheck = false) {
+  // Step 1: Generate the content
   const generationResult = await generateContent(contentBrief);
   
-  if (generationResult.status === 'success') {
-    const processedResult = processContent(generationResult.content, contentBrief);
+  if (generationResult.status !== 'success') {
+    return generationResult; // Return early if content generation failed
+  }
+  
+  // Step 2: Process the content for quality metrics
+  const processedResult = processContent(generationResult.content, contentBrief);
+  
+  // Step 3: Check for plagiarism (unless skipped)
+  if (!skipPlagiarismCheck) {
+    const plagiarismResult = await checkPlagiarism(processedResult.content);
+    
+    // If plagiarized content is detected
+    if (plagiarismResult.isPlagiarized) {
+      logger.warn(`Plagiarized content detected. Similarity score: ${plagiarismResult.similarityScore}%`);
+      
+      // Option 1: Return error and reject the content
+      return {
+        status: 'failed',
+        message: 'Content generation failed due to plagiarism detection',
+        plagiarismDetails: plagiarismResult,
+        originalContent: processedResult.content // Include original for reference/debugging
+      };
+      
+      // Option 2 (alternative): Regenerate content with stricter originality prompt
+      // This could be implemented as an alternative approach
+      // return regenerateWithOriginality(contentBrief, plagiarismResult);
+    }
+    
+    // Add plagiarism check results to the response
+    processedResult.plagiarismCheck = plagiarismResult;
+  }
+  
+  // Return the final result
+  return {
+    ...generationResult,
+    ...processedResult,
+    status: 'success'
+  };
+}
+
+/**
+ * Regenerates content with enhanced originality instructions
+ * This is an alternative approach when plagiarism is detected
+ * 
+ * @param {Object} contentBrief - The content brief
+ * @param {Object} plagiarismResult - Results from the plagiarism check
+ * @returns {Promise<Object>} - The regenerated content
+ */
+async function regenerateWithOriginality(contentBrief, plagiarismResult) {
+  logger.info('Regenerating content with enhanced originality instructions');
+  
+  // Create a modified brief with stronger originality instructions
+  const enhancedBrief = {
+    ...contentBrief,
+    forceOriginality: true
+  };
+  
+  if (plagiarismResult.sources && plagiarismResult.sources.length > 0) {
+    // Add information about detected sources to avoid
+    enhancedBrief.avoidSimilarityTo = plagiarismResult.sources.map(source => 
+      `"${source.title}" (${source.url})`
+    ).join(', ');
+  }
+  
+  // Generate new content with enhanced brief
+  const regeneratedResult = await generateContent(enhancedBrief);
+  
+  if (regeneratedResult.status === 'success') {
+    // Process the regenerated content
+    const processedResult = processContent(regeneratedResult.content, contentBrief);
+    
+    // Check plagiarism again
+    const secondPlagiarismCheck = await checkPlagiarism(processedResult.content);
+    
+    if (secondPlagiarismCheck.isPlagiarized) {
+      // If still plagiarized, give up and return error
+      logger.error('Regenerated content still contains plagiarism');
+      return {
+        status: 'failed',
+        message: 'Unable to generate original content after multiple attempts',
+        plagiarismDetails: secondPlagiarismCheck
+      };
+    }
+    
+    // Return successful regeneration
     return {
-      ...generationResult,
-      ...processedResult
+      ...regeneratedResult,
+      ...processedResult,
+      plagiarismCheck: secondPlagiarismCheck,
+      wasRegenerated: true
     };
   }
   
-  return generationResult;
+  // If regeneration failed
+  return regeneratedResult;
 }
 
 module.exports = {
   generateContent,
   createContent,
-  processContent
+  processContent,
+  checkPlagiarism,
+  regenerateWithOriginality
 };
