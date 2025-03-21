@@ -50,33 +50,9 @@ SiteGenie is an AI-powered system designed to automate niche research, website c
 - Generates regular performance reports and ROI analysis.
 - Tracks competitor performance and gap analysis.
 
-## Installation
+## Setup and Installation
 
-To install SiteGenie, clone the repository and follow these steps:
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/SiteGenie.git
-
-# Navigate to the project directory
-cd SiteGenie
-
-# Install dependencies
-npm install
-
-# Run the application
-npm start
-```
-
-## Usage
-
-SiteGenie is designed to run as a fully automated workflow. To initiate the process, use the following command:
-
-```bash
-npm run start:automation
-```
-
-Configuration settings are located in the `config.json` file. Customize them according to your preferences before running the application.
+For detailed setup instructions, please refer to [setup.md](setup.md). This document provides step-by-step guidance for setting up both development and production environments using Docker.
 
 ## Contributing
 
@@ -94,4 +70,3 @@ SiteGenie is licensed under the MIT License. See `LICENSE` for more information.
 ## Contact
 
 For questions or feedback, feel free to open an issue or reach out directly via email at support@sitegenie.ai.
-
