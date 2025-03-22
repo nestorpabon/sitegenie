@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 const logger = require('./utils/logger');
 const { addToQueue } = require('./utils/queue');
 const crypto = require('crypto');
+const Chart = require('chart.js');
 
 // Initialize PostgreSQL connection pool
 const pool = new Pool({
@@ -509,6 +510,295 @@ async function saveContentToDatabase(contentData) {
 }
 
 /**
+ * Renders site performance data as a bar graph using Chart.js
+ * 
+ * @param {string} siteId - The ID of the site
+ * @param {string} canvasId - The ID of the HTML canvas element to render the graph
+ * @param {Object} options - Rendering options
+ * @param {string} [options.period='last_30_days'] - Time period for data (last_30_days, last_90_days, last_year)
+ * @param {Array<string>} [options.metrics] - Specific metrics to display
+ * @param {string} [options.graphType='bar'] - Type of graph to render (bar, line)
+ * @returns {Promise<Object>} - Result of the graph rendering operation
+ */
+async function renderSitePerformanceGraph(siteId, canvasId, options = {}) {
+  try {
+    // Default options
+    const {
+      period = 'last_30_days',
+      metrics = ['pageviews', 'sessions', 'conversion_rate', 'avg_session_duration'],
+      graphType = 'bar'
+    } = options;
+    
+    // Validate required parameters
+    if (!siteId) {
+      throw new Error('Site ID is required');
+    }
+    
+    if (!canvasId) {
+      throw new Error('Canvas ID is required');
+    }
+    
+    // Get the canvas element
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) {
+      throw new Error(`Canvas element with ID "${canvasId}" not found`);
+    }
+    
+    // Determine date range based on period
+    let startDate = new Date();
+    const endDate = new Date();
+    
+    switch (period) {
+      case 'last_7_days':
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case 'last_30_days':
+        startDate.setDate(startDate.getDate() - 30);
+        break;
+      case 'last_90_days':
+        startDate.setDate(startDate.getDate() - 90);
+        break;
+      case 'last_year':
+        startDate.setFullYear(startDate.getFullYear() - 1);
+        break;
+      default:
+        startDate.setDate(startDate.getDate() - 30); // Default to 30 days
+    }
+    
+    logger.info(`Retrieving performance data for site ${siteId} from ${startDate.toISOString()} to ${endDate.toISOString()}`);
+    
+    // Fetch performance data from API
+    const response = await axios.get(`/api/sites/${siteId}/performance`, {
+      params: {
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
+        metrics: metrics.join(',')
+      }
+    });
+    
+    const performanceData = response.data;
+    
+    if (!performanceData || !performanceData.success) {
+      throw new Error('Failed to retrieve performance data');
+    }
+    
+    if (!performanceData.data || performanceData.data.length === 0) {
+      logger.warn(`No performance data available for site ${siteId}`);
+      return {
+        success: false,
+        message: 'No performance data available for the selected period'
+      };
+    }
+    
+    // Process data for Chart.js
+    const timeLabels = [];
+    const datasets = {};
+    
+    // Initialize datasets for each metric
+    metrics.forEach(metric => {
+      datasets[metric] = {
+        label: formatMetricLabel(metric),
+        data: [],
+        backgroundColor: getColorForMetric(metric),
+        borderColor: getColorForMetric(metric),
+        borderWidth: 1
+      };
+    });
+    
+    // Populate datasets with performance data
+    performanceData.data.forEach(dataPoint => {
+      // Format date for display
+      const date = new Date(dataPoint.date);
+      let dateLabel;
+      
+      if (period === 'last_7_days' || period === 'last_30_days') {
+        dateLabel = date.toLocaleDateString();
+      } else {
+        dateLabel = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      }
+      
+      timeLabels.push(dateLabel);
+      
+      // Add data for each metric
+      metrics.forEach(metric => {
+        datasets[metric].data.push(dataPoint[metric] || 0);
+      });
+    });
+    
+    // Create chart configuration
+    const chartConfig = {
+      type: graphType,
+      data: {
+        labels: timeLabels,
+        datasets: Object.values(datasets)
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: {
+            position: 'top',
+          },
+          title: {
+            display: true,
+            text: `Site Performance - ${formatPeriodLabel(period)}`
+          },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                let label = context.dataset.label || '';
+                if (label) {
+                  label += ': ';
+                }
+                if (context.parsed.y !== null) {
+                  if (context.dataset.label.includes('Rate')) {
+                    label += context.parsed.y.toFixed(2) + '%';
+                  } else if (context.dataset.label.includes('Duration')) {
+                    label += formatDuration(context.parsed.y);
+                  } else {
+                    label += context.parsed.y.toLocaleString();
+                  }
+                }
+                return label;
+              }
+            }
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            ticks: {
+              callback: function(value) {
+                // Format y-axis values based on metric type
+                if (this.chart.data.datasets[0].label.includes('Rate')) {
+                  return value + '%';
+                } else if (this.chart.data.datasets[0].label.includes('Duration')) {
+                  return formatDuration(value);
+                } else {
+                  return value.toLocaleString();
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+    
+    // Create the chart
+    new Chart(canvas, chartConfig);
+    
+    logger.info(`Performance graph rendered successfully for site ${siteId}`);
+    
+    return {
+      success: true,
+      metrics: metrics,
+      period: period,
+      dataPoints: performanceData.data.length
+    };
+  } catch (error) {
+    logger.error(`Failed to render performance graph for site ${siteId}:`, error);
+    
+    // Check if it's a canvas-related error
+    if (error.message.includes('Canvas')) {
+      return {
+        success: false,
+        error: error.message,
+        type: 'dom_error'
+      };
+    }
+    
+    // Check if it's a data retrieval error
+    if (error.message.includes('performance data')) {
+      return {
+        success: false,
+        error: error.message,
+        type: 'data_error'
+      };
+    }
+    
+    return {
+      success: false,
+      error: error.message,
+      details: error.stack
+    };
+  }
+}
+
+/**
+ * Helper function to format metric labels for display
+ * 
+ * @param {string} metric - The metric name
+ * @returns {string} - Formatted label
+ */
+function formatMetricLabel(metric) {
+  const labels = {
+    pageviews: 'Page Views',
+    sessions: 'Sessions',
+    users: 'Users',
+    conversion_rate: 'Conversion Rate',
+    bounce_rate: 'Bounce Rate',
+    avg_session_duration: 'Avg. Session Duration',
+    revenue: 'Revenue',
+    transactions: 'Transactions'
+  };
+  
+  return labels[metric] || metric.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/**
+ * Helper function to get a color for a specific metric
+ * 
+ * @param {string} metric - The metric name
+ * @returns {string} - Color in hex or rgba format
+ */
+function getColorForMetric(metric) {
+  const colors = {
+    pageviews: 'rgba(54, 162, 235, 0.7)',
+    sessions: 'rgba(75, 192, 192, 0.7)',
+    users: 'rgba(153, 102, 255, 0.7)',
+    conversion_rate: 'rgba(255, 159, 64, 0.7)',
+    bounce_rate: 'rgba(255, 99, 132, 0.7)',
+    avg_session_duration: 'rgba(255, 205, 86, 0.7)',
+    revenue: 'rgba(46, 204, 113, 0.7)',
+    transactions: 'rgba(52, 152, 219, 0.7)'
+  };
+  
+  return colors[metric] || `hsl(${Math.floor(Math.random() * 360)}, 70%, 60%)`;
+}
+
+/**
+ * Helper function to format the time period label
+ * 
+ * @param {string} period - The time period
+ * @returns {string} - Formatted label
+ */
+function formatPeriodLabel(period) {
+  const labels = {
+    last_7_days: 'Last 7 Days',
+    last_30_days: 'Last 30 Days',
+    last_90_days: 'Last 90 Days',
+    last_year: 'Last Year'
+  };
+  
+  return labels[period] || period.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/**
+ * Helper function to format duration in seconds to a readable format
+ * 
+ * @param {number} seconds - Duration in seconds
+ * @returns {string} - Formatted duration
+ */
+function formatDuration(seconds) {
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  } else {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.round(seconds % 60);
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+}
+
+/**
  * Main function to generate and process content based on a brief
  * 
  * @param {Object} contentBrief - The content brief
@@ -705,5 +995,6 @@ module.exports = {
   checkPlagiarism,
   regenerateWithOriginality,
   getSiteData,
-  saveContentToDatabase
+  saveContentToDatabase,
+  renderSitePerformanceGraph
 };
