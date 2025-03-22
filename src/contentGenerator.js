@@ -1,13 +1,86 @@
 const axios = require('axios');
-const logger = require('./utils/logger'); // Assuming a logger utility exists
-const { addToQueue } = require('./utils/queue'); // Assuming a queue utility exists
-const crypto = require('crypto'); // For generating Copyscape API signatures
+const { Pool } = require('pg');
+const logger = require('./utils/logger');
+const { addToQueue } = require('./utils/queue');
+const crypto = require('crypto');
+
+// Initialize PostgreSQL connection pool
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: process.env.DB_PORT || 5432,
+  database: process.env.DB_NAME || 'sitegenie',
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
+});
+
+/**
+ * Retrieves site data from the database
+ * 
+ * @param {string} siteId - The ID of the site
+ * @returns {Promise<Object|null>} - Site data or null if not found/invalid
+ */
+async function getSiteData(siteId) {
+  let client;
+  
+  try {
+    client = await pool.connect();
+    
+    const query = `
+      SELECT 
+        s.id, 
+        s.domain_name, 
+        s.niche_id,
+        s.status,
+        n.name as niche_name,
+        n.primary_keyword,
+        n.competition_score,
+        n.trending_score,
+        n.target_audience
+      FROM sites s
+      JOIN niches n ON s.niche_id = n.id
+      WHERE s.id = $1
+    `;
+    
+    const result = await client.query(query, [siteId]);
+    
+    if (result.rows.length === 0) {
+      logger.warn(`Site with ID ${siteId} not found`);
+      return null;
+    }
+    
+    const siteData = result.rows[0];
+    
+    // Validate site status
+    if (siteData.status !== 'active') {
+      logger.warn(`Site ${siteId} is not active (current status: ${siteData.status})`);
+      return null;
+    }
+    
+    // Validate niche data
+    if (!siteData.niche_id) {
+      logger.warn(`Site ${siteId} has no associated niche`);
+      return null;
+    }
+    
+    logger.info(`Retrieved data for site ${siteId} (${siteData.domain_name})`);
+    return siteData;
+    
+  } catch (error) {
+    logger.error(`Failed to retrieve site data for ${siteId}:`, error);
+    return null;
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+}
 
 /**
  * Generates content using OpenAI GPT-4 based on the provided content brief
  * 
  * @param {Object} contentBrief - The brief containing details for content generation
- * @param {string} contentBrief.niche - The niche/industry for the content
+ * @param {string} contentBrief.siteId - The ID of the site for which content is being generated
  * @param {string} contentBrief.topic - The main topic of the content
  * @param {string} contentBrief.primaryKeyword - The primary SEO keyword to target
  * @param {number} contentBrief.wordCount - Approximate word count for the content
@@ -19,26 +92,51 @@ const crypto = require('crypto'); // For generating Copyscape API signatures
  * @returns {Promise<Object>} - Object containing the generated content and metadata
  */
 async function generateContent(contentBrief) {
-  const systemPrompt = `You are an expert content writer specializing in ${contentBrief.niche}. 
-  Create SEO-optimized content that is informative, engaging, and follows E-E-A-T principles.`;
-  
-  const userPrompt = `Write a comprehensive article about "${contentBrief.topic}" targeting the keyword "${contentBrief.primaryKeyword}".
-  The article should be approximately ${contentBrief.wordCount} words.
-  Include the following sections: ${contentBrief.sections.join(', ')}.
-  Target audience: ${contentBrief.targetAudience}.
-  Include factual information, statistics, and expert insights where possible.`;
-  
-  // Add secondary keywords if provided
-  if (contentBrief.secondaryKeywords && contentBrief.secondaryKeywords.length > 0) {
-    userPrompt += `\nPlease naturally incorporate these secondary keywords: ${contentBrief.secondaryKeywords.join(', ')}.`;
-  }
-  
-  // Add tone specification if provided
-  if (contentBrief.tone) {
-    userPrompt += `\nThe tone of the article should be ${contentBrief.tone}.`;
-  }
-  
   try {
+    // If siteId is provided, fetch site data
+    let siteData = null;
+    let niche = contentBrief.niche;
+    let targetAudience = contentBrief.targetAudience;
+    
+    if (contentBrief.siteId) {
+      siteData = await getSiteData(contentBrief.siteId);
+      
+      if (!siteData) {
+        return {
+          status: 'failed',
+          message: `Could not retrieve data for site ${contentBrief.siteId}`
+        };
+      }
+      
+      // Use site data to enhance the content brief
+      niche = siteData.niche_name || niche;
+      targetAudience = siteData.target_audience || targetAudience;
+    }
+    
+    const systemPrompt = `You are an expert content writer specializing in ${niche}. 
+    Create SEO-optimized content that is informative, engaging, and follows E-E-A-T principles.`;
+    
+    const userPrompt = `Write a comprehensive article about "${contentBrief.topic}" targeting the keyword "${contentBrief.primaryKeyword}".
+    The article should be approximately ${contentBrief.wordCount} words.
+    Include the following sections: ${contentBrief.sections.join(', ')}.
+    Target audience: ${targetAudience}.
+    Include factual information, statistics, and expert insights where possible.`;
+    
+    // Add secondary keywords if provided
+    if (contentBrief.secondaryKeywords && contentBrief.secondaryKeywords.length > 0) {
+      userPrompt += `\nPlease naturally incorporate these secondary keywords: ${contentBrief.secondaryKeywords.join(', ')}.`;
+    }
+    
+    // Add tone specification if provided
+    if (contentBrief.tone) {
+      userPrompt += `\nThe tone of the article should be ${contentBrief.tone}.`;
+    }
+    
+    // Add site context if available
+    if (siteData) {
+      userPrompt += `\nThis content will be published on ${siteData.domain_name}, a website focused on ${siteData.niche_name}.`;
+    }
+    
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4',
       messages: [
@@ -59,7 +157,9 @@ async function generateContent(contentBrief) {
       content: response.data.choices[0].message.content,
       tokens_used: response.data.usage.total_tokens,
       completion_time: Date.now(),
-      status: 'success'
+      status: 'success',
+      site_id: contentBrief.siteId,
+      site_domain: siteData?.domain_name
     };
   } catch (error) {
     logger.error('Content generation failed:', error);
@@ -111,13 +211,27 @@ async function generateFallbackContent(contentBrief) {
   try {
     logger.info('Attempting fallback content generation with GPT-3.5-turbo');
     
-    const systemPrompt = `You are an expert content writer specializing in ${contentBrief.niche}. 
+    // If siteId is provided, fetch site data
+    let siteData = null;
+    let niche = contentBrief.niche;
+    let targetAudience = contentBrief.targetAudience;
+    
+    if (contentBrief.siteId) {
+      siteData = await getSiteData(contentBrief.siteId);
+      
+      if (siteData) {
+        niche = siteData.niche_name || niche;
+        targetAudience = siteData.target_audience || targetAudience;
+      }
+    }
+    
+    const systemPrompt = `You are an expert content writer specializing in ${niche}. 
     Create SEO-optimized content that is informative and engaging.`;
     
     const userPrompt = `Write a comprehensive article about "${contentBrief.topic}" targeting the keyword "${contentBrief.primaryKeyword}".
     The article should be approximately ${contentBrief.wordCount} words.
     Include the following sections: ${contentBrief.sections.join(', ')}.
-    Target audience: ${contentBrief.targetAudience}.`;
+    Target audience: ${targetAudience}.`;
     
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-3.5-turbo',
@@ -141,7 +255,9 @@ async function generateFallbackContent(contentBrief) {
       completion_time: Date.now(),
       status: 'success',
       model_used: 'gpt-3.5-turbo', // Indicate fallback model was used
-      is_fallback: true
+      is_fallback: true,
+      site_id: contentBrief.siteId,
+      site_domain: siteData?.domain_name
     };
   } catch (error) {
     logger.error('Fallback content generation failed:', error);
@@ -290,54 +406,239 @@ function processContent(content, contentBrief) {
 }
 
 /**
+ * Saves generated content to the database
+ * 
+ * @param {Object} contentData - Content data to save
+ * @param {string} contentData.siteId - The site ID
+ * @param {string} contentData.title - Content title
+ * @param {string} contentData.content - The generated content
+ * @param {string} contentData.primaryKeyword - Primary keyword
+ * @param {string} contentData.contentType - Type of content
+ * @returns {Promise<Object>} - Result of the save operation
+ */
+async function saveContentToDatabase(contentData) {
+  let client;
+  
+  try {
+    client = await pool.connect();
+    
+    // Generate a slug from the title
+    const slug = contentData.title
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, '') // Remove special characters
+      .replace(/\s+/g, '-') // Replace spaces with hyphens
+      .replace(/-+/g, '-') // Replace multiple hyphens with single hyphen
+      .trim();
+    
+    // Check if the slug already exists for this site
+    const checkQuery = `
+      SELECT id FROM content
+      WHERE site_id = $1 AND slug = $2
+    `;
+    
+    const checkResult = await client.query(checkQuery, [
+      contentData.siteId,
+      slug
+    ]);
+    
+    // If the slug exists, modify it to make it unique
+    let finalSlug = slug;
+    if (checkResult.rows.length > 0) {
+      finalSlug = `${slug}-${Date.now().toString().slice(-6)}`;
+    }
+    
+    // Insert the content
+    const insertQuery = `
+      INSERT INTO content (
+        site_id,
+        title,
+        slug,
+        content,
+        content_type,
+        status,
+        primary_keyword,
+        word_count,
+        created_at,
+        seo_score
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id
+    `;
+    
+    const now = new Date();
+    const wordCount = contentData.content.split(/\s+/).length;
+    
+    const insertResult = await client.query(insertQuery, [
+      contentData.siteId,
+      contentData.title,
+      finalSlug,
+      contentData.content,
+      contentData.contentType || 'blog_post',
+      'draft', // Default status
+      contentData.primaryKeyword,
+      wordCount,
+      now.toISOString(),
+      contentData.seoScore || 70 // Default SEO score
+    ]);
+    
+    const contentId = insertResult.rows[0].id;
+    
+    logger.info(`Content saved to database with ID: ${contentId}`);
+    
+    return {
+      success: true,
+      contentId,
+      slug: finalSlug,
+      wordCount,
+      createdAt: now.toISOString()
+    };
+    
+  } catch (error) {
+    logger.error('Failed to save content to database:', error);
+    
+    return {
+      success: false,
+      error: error.message,
+      details: error.stack
+    };
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+}
+
+/**
  * Main function to generate and process content based on a brief
  * 
  * @param {Object} contentBrief - The content brief
  * @param {boolean} [skipPlagiarismCheck=false] - Whether to skip the plagiarism check
+ * @param {boolean} [saveToDatabase=false] - Whether to save the content to the database
  * @returns {Promise<Object>} - The final processed content
  */
-async function createContent(contentBrief, skipPlagiarismCheck = false) {
-  // Step 1: Generate the content
-  const generationResult = await generateContent(contentBrief);
-  
-  if (generationResult.status !== 'success') {
-    return generationResult; // Return early if content generation failed
-  }
-  
-  // Step 2: Process the content for quality metrics
-  const processedResult = processContent(generationResult.content, contentBrief);
-  
-  // Step 3: Check for plagiarism (unless skipped)
-  if (!skipPlagiarismCheck) {
-    const plagiarismResult = await checkPlagiarism(processedResult.content);
-    
-    // If plagiarized content is detected
-    if (plagiarismResult.isPlagiarized) {
-      logger.warn(`Plagiarized content detected. Similarity score: ${plagiarismResult.similarityScore}%`);
-      
-      // Option 1: Return error and reject the content
+async function createContent(contentBrief, skipPlagiarismCheck = false, saveToDatabase = false) {
+  try {
+    // Validate that we have the required brief information
+    if (!contentBrief.topic || !contentBrief.primaryKeyword) {
       return {
         status: 'failed',
-        message: 'Content generation failed due to plagiarism detection',
-        plagiarismDetails: plagiarismResult,
-        originalContent: processedResult.content // Include original for reference/debugging
+        message: 'Content brief must include topic and primaryKeyword'
       };
-      
-      // Option 2 (alternative): Regenerate content with stricter originality prompt
-      // This could be implemented as an alternative approach
-      // return regenerateWithOriginality(contentBrief, plagiarismResult);
     }
     
-    // Add plagiarism check results to the response
-    processedResult.plagiarismCheck = plagiarismResult;
+    // Ensure basic defaults are set
+    contentBrief.wordCount = contentBrief.wordCount || 1500;
+    contentBrief.sections = contentBrief.sections || ['Introduction', 'Main Content', 'Conclusion'];
+    
+    // Step 1: Generate the content
+    const generationResult = await generateContent(contentBrief);
+    
+    if (generationResult.status !== 'success') {
+      return generationResult; // Return early if content generation failed
+    }
+    
+    // Step 2: Process the content for quality metrics
+    const processedResult = processContent(generationResult.content, contentBrief);
+    
+    // Step 3: Check for plagiarism (unless skipped)
+    if (!skipPlagiarismCheck) {
+      const plagiarismResult = await checkPlagiarism(processedResult.content);
+      
+      // If plagiarized content is detected
+      if (plagiarismResult.isPlagiarized) {
+        logger.warn(`Plagiarized content detected. Similarity score: ${plagiarismResult.similarityScore}%`);
+        
+        // Option 1: Return error and reject the content
+        return {
+          status: 'failed',
+          message: 'Content generation failed due to plagiarism detection',
+          plagiarismDetails: plagiarismResult,
+          originalContent: processedResult.content // Include original for reference/debugging
+        };
+        
+        // Option 2 (alternative): Regenerate content with stricter originality prompt
+        // This could be implemented as an alternative approach
+        // return regenerateWithOriginality(contentBrief, plagiarismResult);
+      }
+      
+      // Add plagiarism check results to the response
+      processedResult.plagiarismCheck = plagiarismResult;
+    }
+    
+    // Step 4: Save to database if requested
+    let saveResult = null;
+    if (saveToDatabase && contentBrief.siteId) {
+      saveResult = await saveContentToDatabase({
+        siteId: contentBrief.siteId,
+        title: contentBrief.title || contentBrief.topic,
+        content: processedResult.content,
+        primaryKeyword: contentBrief.primaryKeyword,
+        contentType: contentBrief.contentType || 'blog_post',
+        seoScore: calculateSEOScore(processedResult)
+      });
+      
+      if (!saveResult.success) {
+        logger.error('Failed to save content to database');
+      }
+    }
+    
+    // Return the final result
+    return {
+      ...generationResult,
+      ...processedResult,
+      ...(saveResult && { databaseSave: saveResult }),
+      status: 'success'
+    };
+  } catch (error) {
+    logger.error('Error in createContent:', error);
+    
+    return {
+      status: 'failed',
+      message: `An unexpected error occurred: ${error.message}`,
+      error: error.stack
+    };
+  }
+}
+
+/**
+ * Calculates an SEO score for the content based on various metrics
+ * 
+ * @param {Object} processedContent - The processed content result
+ * @returns {number} - SEO score between 0-100
+ */
+function calculateSEOScore(processedContent) {
+  let score = 70; // Base score
+  const metrics = processedContent.metrics;
+  
+  // Word count scoring
+  if (metrics.wordCount >= metrics.targetWordCount * 1.1) {
+    score += 10; // Exceeds target by 10%+
+  } else if (metrics.wordCount >= metrics.targetWordCount) {
+    score += 5; // Meets target
+  } else if (metrics.wordCount < metrics.targetWordCount * 0.8) {
+    score -= 10; // Significantly below target
+  } else if (metrics.wordCount < metrics.targetWordCount) {
+    score -= 5; // Below target
   }
   
-  // Return the final result
-  return {
-    ...generationResult,
-    ...processedResult,
-    status: 'success'
-  };
+  // Keyword density scoring
+  if (metrics.keywordDensity >= 0.5 && metrics.keywordDensity <= 2.5) {
+    score += 10; // Optimal range
+  } else if (metrics.keywordDensity > 2.5 && metrics.keywordDensity <= 3.5) {
+    score += 5; // Acceptable but high
+  } else if (metrics.keywordDensity > 3.5) {
+    score -= 10; // Keyword stuffing
+  } else if (metrics.keywordDensity < 0.5) {
+    score -= 5; // Too low
+  }
+  
+  // Apply penalties for warnings
+  if (processedContent.warnings && processedContent.warnings.length > 0) {
+    score -= (processedContent.warnings.length * 5);
+  }
+  
+  // Ensure score stays within 0-100 range
+  return Math.max(0, Math.min(100, Math.round(score)));
 }
 
 /**
@@ -402,5 +703,7 @@ module.exports = {
   createContent,
   processContent,
   checkPlagiarism,
-  regenerateWithOriginality
+  regenerateWithOriginality,
+  getSiteData,
+  saveContentToDatabase
 };
