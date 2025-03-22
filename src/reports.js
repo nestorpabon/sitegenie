@@ -246,11 +246,17 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
   let client;
   
   try {
+    // Input validation
+    if (!niche1Id || !niche2Id) {
+      throw new Error('Both niche IDs are required for comparison');
+    }
+    
     // Ensure reports directory exists
     await fs.mkdir(outputDir, { recursive: true });
     
     // Connect to database
     client = await pool.connect();
+    logger.info(`Connected to database for niche comparison: ${niche1Id} vs ${niche2Id}`);
     
     // Determine date range based on timeframe
     let startDate = new Date();
@@ -266,7 +272,18 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
       startDate.setFullYear(startDate.getFullYear() - 1);
     }
     
-    // Query for detailed niche comparison
+    // First check if both niches exist
+    const nicheCheckQuery = `
+      SELECT id, name FROM niches WHERE id IN ($1, $2)
+    `;
+    
+    const nicheCheckResult = await client.query(nicheCheckQuery, [niche1Id, niche2Id]);
+    
+    if (nicheCheckResult.rows.length < 2) {
+      throw new Error('One or both of the specified niches do not exist');
+    }
+    
+    // Query for detailed niche comparison with enhanced grouping
     const query = `
       SELECT
         n.id,
@@ -274,6 +291,8 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
         n.competition_score,
         n.monetization_potential,
         n.trending_score,
+        n.monthly_search_volume,
+        n.estimated_cpc,
         COUNT(DISTINCT s.id) as site_count,
         AVG(s.monthly_traffic) as avg_traffic,
         MAX(s.monthly_traffic) as max_traffic,
@@ -283,6 +302,7 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
         AVG(s.conversion_rate) as avg_conversion_rate,
         AVG(s.domain_authority) as avg_domain_authority,
         SUM(s.total_backlinks) as total_backlinks,
+        AVG(s.organic_keywords) as avg_organic_keywords,
         (
           SELECT AVG(c.seo_score)
           FROM content c
@@ -294,16 +314,26 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
           FROM content c
           JOIN sites s2 ON c.site_id = s2.id
           WHERE s2.niche_id = n.id
-        ) as total_content_count
+        ) as total_content_count,
+        (
+          SELECT STRING_AGG(keyword, ', ' ORDER BY keyword)
+          FROM (
+            SELECT DISTINCT nk.keyword
+            FROM niche_keywords nk
+            WHERE nk.niche_id = n.id
+            LIMIT 10
+          ) as keywords
+        ) as top_keywords
       FROM
         niches n
       LEFT JOIN
         sites s ON n.id = s.niche_id
       WHERE
         n.id IN ($1, $2)
-        AND s.created_at BETWEEN $3 AND $4
+        AND (s.created_at BETWEEN $3 AND $4 OR s.created_at IS NULL)
       GROUP BY
-        n.id, n.name, n.competition_score, n.monetization_potential, n.trending_score
+        n.id, n.name, n.competition_score, n.monetization_potential, 
+        n.trending_score, n.monthly_search_volume, n.estimated_cpc
     `;
     
     const result = await client.query(query, [
@@ -313,60 +343,90 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
       endDate.toISOString()
     ]);
     
+    // Verify we have data for both niches
     if (result.rows.length !== 2) {
-      throw new Error('Could not retrieve data for both niches');
+      // Check which niche has data
+      const foundNiches = result.rows.map(row => row.id);
+      const missingNiches = [niche1Id, niche2Id].filter(id => !foundNiches.includes(id));
+      
+      throw new Error(`Could not retrieve performance data for niche(s): ${missingNiches.join(', ')}`);
     }
     
     // Process comparison data
     const niche1 = result.rows.find(row => row.id === niche1Id);
     const niche2 = result.rows.find(row => row.id === niche2Id);
     
-    // Generate comparison metrics
-    const comparisonData = [];
+    // Format numeric values
+    [niche1, niche2].forEach(niche => {
+      Object.keys(niche).forEach(key => {
+        if (typeof niche[key] === 'number') {
+          if (key.includes('score') || key.includes('rate') || key.includes('revenue') || key.includes('earnings')) {
+            niche[key] = parseFloat(niche[key].toFixed(2));
+          } else if (key.includes('count') || key.includes('traffic') || key.includes('volume') || key.includes('backlinks')) {
+            niche[key] = parseInt(niche[key], 10);
+          }
+        }
+      });
+    });
     
-    // Format the metrics for CSV
+    // Generate comparison metrics
     const metrics = [
       { name: 'Niche Name', niche1: niche1.name, niche2: niche2.name },
+      { name: 'Monthly Search Volume', niche1: niche1.monthly_search_volume || 0, niche2: niche2.monthly_search_volume || 0,
+        difference: (niche1.monthly_search_volume || 0) - (niche2.monthly_search_volume || 0) },
       { name: 'Competition Score', niche1: niche1.competition_score, niche2: niche2.competition_score, 
         difference: (niche1.competition_score - niche2.competition_score).toFixed(2) },
       { name: 'Monetization Potential', niche1: niche1.monetization_potential, niche2: niche2.monetization_potential,
         difference: (niche1.monetization_potential - niche2.monetization_potential).toFixed(2) },
       { name: 'Trending Score', niche1: niche1.trending_score, niche2: niche2.trending_score,
         difference: (niche1.trending_score - niche2.trending_score).toFixed(2) },
-      { name: 'Site Count', niche1: niche1.site_count, niche2: niche2.site_count,
-        difference: niche1.site_count - niche2.site_count },
-      { name: 'Average Traffic', niche1: Math.round(niche1.avg_traffic), niche2: Math.round(niche2.avg_traffic),
-        difference: Math.round(niche1.avg_traffic - niche2.avg_traffic) },
-      { name: 'Maximum Traffic', niche1: niche1.max_traffic, niche2: niche2.max_traffic,
-        difference: niche1.max_traffic - niche2.max_traffic },
-      { name: 'Total Revenue', niche1: niche1.total_revenue?.toFixed(2), niche2: niche2.total_revenue?.toFixed(2),
-        difference: (niche1.total_revenue - niche2.total_revenue).toFixed(2) },
-      { name: 'Average Revenue', niche1: niche1.avg_revenue?.toFixed(2), niche2: niche2.avg_revenue?.toFixed(2),
-        difference: (niche1.avg_revenue - niche2.avg_revenue).toFixed(2) },
-      { name: 'Conversion Rate', niche1: niche1.avg_conversion_rate?.toFixed(2) + '%', 
-        niche2: niche2.avg_conversion_rate?.toFixed(2) + '%',
-        difference: (niche1.avg_conversion_rate - niche2.avg_conversion_rate).toFixed(2) + '%' },
-      { name: 'Average Domain Authority', niche1: niche1.avg_domain_authority?.toFixed(1), 
-        niche2: niche2.avg_domain_authority?.toFixed(1),
-        difference: (niche1.avg_domain_authority - niche2.avg_domain_authority).toFixed(1) },
-      { name: 'Total Backlinks', niche1: niche1.total_backlinks, niche2: niche2.total_backlinks,
-        difference: niche1.total_backlinks - niche2.total_backlinks },
-      { name: 'Average Content Score', niche1: niche1.avg_content_score?.toFixed(1), 
-        niche2: niche2.avg_content_score?.toFixed(1),
-        difference: (niche1.avg_content_score - niche2.avg_content_score).toFixed(1) },
-      { name: 'Total Content Count', niche1: niche1.total_content_count, niche2: niche2.total_content_count,
-        difference: niche1.total_content_count - niche2.total_content_count }
+      { name: 'Estimated CPC ($)', niche1: niche1.estimated_cpc?.toFixed(2) || '0.00', niche2: niche2.estimated_cpc?.toFixed(2) || '0.00',
+        difference: ((niche1.estimated_cpc || 0) - (niche2.estimated_cpc || 0)).toFixed(2) },
+      { name: 'Site Count', niche1: niche1.site_count || 0, niche2: niche2.site_count || 0,
+        difference: (niche1.site_count || 0) - (niche2.site_count || 0) },
+      { name: 'Average Traffic', niche1: Math.round(niche1.avg_traffic || 0), niche2: Math.round(niche2.avg_traffic || 0),
+        difference: Math.round((niche1.avg_traffic || 0) - (niche2.avg_traffic || 0)) },
+      { name: 'Maximum Traffic', niche1: niche1.max_traffic || 0, niche2: niche2.max_traffic || 0,
+        difference: (niche1.max_traffic || 0) - (niche2.max_traffic || 0) },
+      { name: 'Total Revenue ($)', niche1: (niche1.total_revenue || 0).toFixed(2), niche2: (niche2.total_revenue || 0).toFixed(2),
+        difference: ((niche1.total_revenue || 0) - (niche2.total_revenue || 0)).toFixed(2) },
+      { name: 'Average Revenue ($)', niche1: (niche1.avg_revenue || 0).toFixed(2), niche2: (niche2.avg_revenue || 0).toFixed(2),
+        difference: ((niche1.avg_revenue || 0) - (niche2.avg_revenue || 0)).toFixed(2) },
+      { name: 'Conversion Rate (%)', niche1: (niche1.avg_conversion_rate || 0).toFixed(2), 
+        niche2: (niche2.avg_conversion_rate || 0).toFixed(2),
+        difference: ((niche1.avg_conversion_rate || 0) - (niche2.avg_conversion_rate || 0)).toFixed(2) },
+      { name: 'Average Domain Authority', niche1: (niche1.avg_domain_authority || 0).toFixed(1), 
+        niche2: (niche2.avg_domain_authority || 0).toFixed(1),
+        difference: ((niche1.avg_domain_authority || 0) - (niche2.avg_domain_authority || 0)).toFixed(1) },
+      { name: 'Total Backlinks', niche1: niche1.total_backlinks || 0, niche2: niche2.total_backlinks || 0,
+        difference: (niche1.total_backlinks || 0) - (niche2.total_backlinks || 0) },
+      { name: 'Average Organic Keywords', niche1: Math.round(niche1.avg_organic_keywords || 0), 
+        niche2: Math.round(niche2.avg_organic_keywords || 0),
+        difference: Math.round((niche1.avg_organic_keywords || 0) - (niche2.avg_organic_keywords || 0)) },
+      { name: 'Average Content Score', niche1: (niche1.avg_content_score || 0).toFixed(1), 
+        niche2: (niche2.avg_content_score || 0).toFixed(1),
+        difference: ((niche1.avg_content_score || 0) - (niche2.avg_content_score || 0)).toFixed(1) },
+      { name: 'Total Content Count', niche1: niche1.total_content_count || 0, niche2: niche2.total_content_count || 0,
+        difference: (niche1.total_content_count || 0) - (niche2.total_content_count || 0) }
     ];
     
     // Calculate ROI metrics
-    const roi1 = niche1.avg_revenue / (niche1.competition_score || 1);
-    const roi2 = niche2.avg_revenue / (niche2.competition_score || 1);
+    const roi1 = (niche1.avg_revenue || 0) / (niche1.competition_score || 1);
+    const roi2 = (niche2.avg_revenue || 0) / (niche2.competition_score || 1);
     
     metrics.push({
       name: 'ROI Score (Revenue/Competition)',
       niche1: roi1.toFixed(2),
       niche2: roi2.toFixed(2),
       difference: (roi1 - roi2).toFixed(2)
+    });
+    
+    // Add keyword comparison
+    metrics.push({
+      name: 'Top Keywords',
+      niche1: niche1.top_keywords || 'N/A',
+      niche2: niche2.top_keywords || 'N/A',
+      difference: 'N/A'
     });
     
     // Write comparison to CSV
@@ -376,11 +436,12 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
         { id: 'name', title: 'Metric' },
         { id: 'niche1', title: niche1.name },
         { id: 'niche2', title: niche2.name },
-        { id: 'difference', title: 'Difference' }
+        { id: 'difference', title: 'Difference (Niche1 - Niche2)' }
       ]
     });
     
     await csvWriter.writeRecords(metrics);
+    logger.info(`Niche comparison report generated at ${outputPath}`);
     
     return {
       success: true,
@@ -394,7 +455,11 @@ async function generateNicheComparisonReport(niche1Id, niche2Id, options = {}) {
         name: niche2.name
       },
       timeframe,
-      generatedAt: new Date().toISOString()
+      generatedAt: new Date().toISOString(),
+      metrics: metrics.map(m => ({
+        name: m.name,
+        difference: m.difference
+      }))
     };
   } catch (error) {
     logger.error('Failed to generate niche comparison report:', error);
