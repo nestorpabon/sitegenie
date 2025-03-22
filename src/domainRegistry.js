@@ -288,9 +288,139 @@ async function registerDomain(nicheData, preferences = {}) {
   }
 }
 
+/**
+ * Retrieves domain search results based on keywords and preferences
+ * 
+ * @param {Object} options - Search options
+ * @param {Array<string>} options.keywords - Keywords to use for domain generation
+ * @param {Array<string>} [options.preferredTLDs] - Preferred TLDs for domain search
+ * @param {boolean} [options.useHyphens] - Whether to include hyphen variations
+ * @param {boolean} [options.shortDomains] - Whether to prefer shorter domains
+ * @param {boolean} [options.includeNumbers] - Whether to include number variations
+ * @param {number} [options.limit] - Maximum number of domains to return (default: 10)
+ * @returns {Promise<Object>} - Domain search results
+ */
+async function retrieveDomainSearchResults(options) {
+  try {
+    const {
+      keywords = [],
+      preferredTLDs,
+      useHyphens,
+      shortDomains,
+      includeNumbers,
+      limit = 10
+    } = options;
+
+    // Validate input
+    if (!keywords || !Array.isArray(keywords) || keywords.length === 0) {
+      return {
+        success: false,
+        error: 'No keywords provided for domain search'
+      };
+    }
+
+    // Generate domain options based on keywords and preferences
+    const preferences = {
+      preferredTLDs,
+      useHyphens,
+      shortDomains,
+      includeNumbers
+    };
+
+    const domainOptions = generateDomainOptions(keywords, preferences);
+    
+    if (domainOptions.length === 0) {
+      return {
+        success: false,
+        error: 'No valid domain options could be generated from the provided keywords'
+      };
+    }
+
+    logger.info(`Generated ${domainOptions.length} domain options for search`);
+
+    // Batch domain availability checks to optimize API calls
+    const batchSize = 10; // Check 10 domains at a time
+    const batches = [];
+    
+    for (let i = 0; i < domainOptions.length; i += batchSize) {
+      batches.push(domainOptions.slice(i, i + batchSize));
+    }
+
+    // Process each batch sequentially to avoid rate limits
+    const searchResults = [];
+    
+    for (const batch of batches) {
+      logger.info(`Checking availability for batch of ${batch.length} domains`);
+      
+      // Check domain availability in parallel within each batch
+      const batchResults = await Promise.all(
+        batch.map(async (domain) => {
+          try {
+            const available = await checkDomainAvailability(domain);
+            const domainParts = domain.split('.');
+            
+            return {
+              domain,
+              domainName: domainParts[0],
+              tld: `.${domainParts[1]}`,
+              available,
+              score: available ? scoreDomain(domain) : 0,
+              premium: available && domainParts[0].length <= 5, // Consider short domains premium
+              price: available ? (domainParts[0].length <= 5 ? 29.99 : 12.99) : null // Premium pricing
+            };
+          } catch (error) {
+            logger.warn(`Error checking availability for ${domain}:`, error);
+            return {
+              domain,
+              available: false,
+              error: error.message
+            };
+          }
+        })
+      );
+      
+      searchResults.push(...batchResults);
+      
+      // Add a small delay between batches to avoid API rate limits
+      if (batches.length > 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    // Filter available domains and sort by score
+    const availableDomains = searchResults
+      .filter(result => result.available)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+    
+    // Prepare response
+    return {
+      success: true,
+      searchTime: new Date().toISOString(),
+      totalOptions: domainOptions.length,
+      availableDomains: availableDomains,
+      count: availableDomains.length,
+      suggestions: availableDomains.map(d => ({
+        domain: d.domain,
+        score: d.score,
+        premium: d.premium,
+        price: d.price
+      }))
+    };
+  } catch (error) {
+    logger.error('Error retrieving domain search results:', error);
+    return {
+      success: false,
+      error: `Domain search error: ${error.message}`,
+      details: error.stack
+    };
+  }
+}
+
 module.exports = {
   registerDomain,
   generateDomainOptions,
   checkDomainAvailability,
-  scoreDomain
+  scoreDomain,
+  retrieveDomainSearchResults
 };
