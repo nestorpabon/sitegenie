@@ -12,7 +12,7 @@ const { version } = require('./package.json');
 const { analyzeNiche } = require('./src/nicheAnalysis');
 const { createSite } = require('./src/siteCreator');
 const { generateContent, createContent } = require('./src/contentGenerator');
-const { registerDomain } = require('./src/domainRegistry');
+const { registerDomain, retrieveDomainSearchResults } = require('./src/domainRegistry');
 const { getNichePerformanceData, generateReport, generateNicheComparisonReport } = require('./src/reports');
 const logger = require('./src/utils/logger');
 
@@ -157,6 +157,32 @@ async function generateAndRetrieveComparisonReport(niche1Id, niche2Id, options) 
     }
   } catch (error) {
     logger.error('An unexpected error occurred while generating the comparison report:', error);
+  }
+}
+
+/**
+ * Retrieves niche data from the database or API
+ * 
+ * @param {string} nicheId - ID of the niche to retrieve
+ * @returns {Promise<Object|null>} - Niche data object or null if not found
+ */
+async function getNicheData(nicheId) {
+  try {
+    logger.info(`Retrieving niche data for ID: ${nicheId}`);
+    
+    // Implementation would connect to database or API
+    // This is a placeholder until actual implementation is added
+    
+    // Simulate a successful retrieval for demonstration
+    return {
+      niche_name: 'Sample Niche',
+      related_keywords: ['keyword1', 'keyword2', 'keyword3'],
+      monthly_search_volume: 5000,
+      competition_score: 35
+    };
+  } catch (error) {
+    logger.error(`Failed to retrieve niche data: ${error.message}`);
+    return null;
   }
 }
 
@@ -356,14 +382,20 @@ async function main() {
 
   // Domain registration command
   program
-    .command('register-domain')
-    .description('Register a domain for a niche')
-    .requiredOption('-n, --niche <id>', 'Niche ID to register domain for')
-    .option('-p, --preferences <json>', 'Domain preferences as JSON string')
+    .command('domain')
+    .description('Search for or register a domain for a niche')
+    .requiredOption('-n, --niche <id>', 'Niche ID to use')
+    .option('-s, --search', 'Search for available domains instead of registering')
+    .option('-k, --keywords <keywords>', 'Additional comma-separated keywords for domain search')
+    .option('-t, --tlds <tlds>', 'Comma-separated list of preferred TLDs')
+    .option('-l, --limit <number>', 'Limit number of domain results', parseInt, 10)
+    .option('--use-hyphens', 'Include hyphenated domain variations')
+    .option('--short-domains', 'Prefer shorter domain names')
+    .option('--include-numbers', 'Include domains with numbers')
+    .option('-p, --preferences <json>', 'Domain preferences as JSON string (for registration)')
     .action(async (options) => {
       try {
         const nicheId = options.niche;
-        logger.info(`Registering domain for niche ID: ${nicheId}`);
         
         // Get niche data first
         const nicheData = await getNicheData(nicheId);
@@ -372,21 +404,72 @@ async function main() {
           return;
         }
         
-        // Parse domain preferences if provided
-        const preferences = options.preferences ? JSON.parse(options.preferences) : {};
-        
-        // Register the domain
-        const result = await registerDomain(nicheData, preferences);
-        
-        if (result.success) {
-          logger.info(`Domain registered successfully: ${result.domain}`);
-          logger.info(`Registration date: ${result.registrationDate}`);
-          logger.info(`Expiration date: ${result.expirationDate}`);
+        // Handle domain search mode
+        if (options.search) {
+          logger.info(`Searching for domains related to niche ID: ${nicheId}`);
+          
+          // Prepare keywords list from niche data and additional keywords
+          const nicheKeywords = [nicheData.niche_name];
+          
+          // Add related keywords from niche
+          if (nicheData.related_keywords && nicheData.related_keywords.length > 0) {
+            nicheKeywords.push(...nicheData.related_keywords.slice(0, 5));
+          }
+          
+          // Add user-provided keywords if any
+          if (options.keywords) {
+            const additionalKeywords = options.keywords.split(',').map(k => k.trim());
+            nicheKeywords.push(...additionalKeywords);
+          }
+          
+          // Parse preferred TLDs if provided
+          const preferredTLDs = options.tlds ? 
+            options.tlds.split(',').map(t => t.trim().startsWith('.') ? t.trim() : `.${t.trim()}`) : 
+            undefined;
+            
+          // Perform domain search
+          const searchResult = await retrieveDomainSearchResults({
+            keywords: nicheKeywords,
+            preferredTLDs,
+            useHyphens: options.useHyphens || false,
+            shortDomains: options.shortDomains || false,
+            includeNumbers: options.includeNumbers || false,
+            limit: options.limit || 10
+          });
+          
+          if (searchResult.success) {
+            logger.info(`Found ${searchResult.count} available domains out of ${searchResult.totalOptions} options`);
+            
+            // Display domain suggestions
+            console.log("\nAvailable Domain Suggestions:");
+            console.log("-----------------------------");
+            searchResult.suggestions.forEach((domain, index) => {
+              console.log(`${index + 1}. ${domain.domain} (Score: ${domain.score.toFixed(1)}${domain.premium ? ' - Premium' : ''})`);
+            });
+            console.log("\nUse 'sitegenie domain -n <niche-id>' without the --search flag to register a domain.");
+          } else {
+            logger.error(`Domain search failed: ${searchResult.error}`);
+          }
         } else {
-          logger.error(`Domain registration failed: ${result.error}`);
+          // Domain registration mode
+          logger.info(`Registering domain for niche ID: ${nicheId}`);
+          
+          // Parse domain preferences if provided
+          const preferences = options.preferences ? JSON.parse(options.preferences) : {};
+          
+          // Register the domain
+          const result = await registerDomain(nicheData, preferences);
+          
+          if (result.success) {
+            logger.info(`Domain registered successfully: ${result.domain}`);
+            logger.info(`Registration date: ${result.registrationDate}`);
+            logger.info(`Expiration date: ${result.expirationDate}`);
+          } else {
+            logger.error(`Domain registration failed: ${result.error}`);
+          }
         }
       } catch (error) {
-        logger.error('Domain registration failed:', error);
+        logger.error('Domain operation failed:', error);
       }
     });
 
