@@ -50,6 +50,13 @@ SiteGenie is an AI-powered system designed to automate niche research, website c
 - Generates regular performance reports and ROI analysis.
 - Tracks competitor performance and gap analysis.
 
+### Content Generation
+- AI-powered content creation using OpenAI GPT-4.
+- Generates SEO-optimized articles based on content briefs.
+- Supports various content types including blog posts, product reviews, and landing pages.
+- Includes quality checks for keyword density and content length.
+- Automatic fallback to alternative models when needed.
+
 ## Installation
 
 To install SiteGenie, clone the repository and follow these steps:
@@ -78,6 +85,50 @@ npm run start:automation
 
 Configuration settings are located in the `config.json` file. Customize them according to your preferences before running the application.
 
+### Content Generation Usage
+
+To generate content using SiteGenie's content generation feature:
+
+1. Set up your environment variables:
+   - Create a `.env` file in the root directory
+   - Add your OpenAI API key: `OPENAI_API_KEY=your_api_key_here`
+
+2. Use the content generator in your code:
+
+```javascript
+const { createContent } = require('./src/contentGenerator');
+
+// Prepare a content brief
+const contentBrief = {
+  niche: 'indoor hydroponics',
+  topic: 'Best Hydroponic Systems for Beginners',
+  primaryKeyword: 'beginner hydroponic systems',
+  wordCount: 2000,
+  sections: ['Introduction', 'What is Hydroponics', 'Top 5 Systems for Beginners', 'Setup Guide', 'Maintenance Tips', 'Conclusion'],
+  targetAudience: 'Beginner gardeners interested in hydroponics',
+  secondaryKeywords: ['easy hydroponics', 'hydroponic starter kit', 'indoor growing systems'],
+  tone: 'informative and encouraging'
+};
+
+// Generate the content
+async function generateArticle() {
+  const result = await createContent(contentBrief);
+  
+  if (result.status === 'success') {
+    console.log('Content generated successfully!');
+    console.log(`Word count: ${result.metrics.wordCount}`);
+    console.log(`Keyword density: ${result.metrics.keywordDensity}%`);
+    console.log(result.content);
+  } else {
+    console.error('Content generation failed:', result.message);
+  }
+}
+
+generateArticle();
+```
+
+3. For batch content generation, create a queue of content briefs and process them sequentially to avoid rate limits.
+
 ## Contributing
 
 We welcome contributions from the community! Feel free to fork the repository and submit a pull request with your improvements. Please ensure your code adheres to our style guide and includes relevant documentation.
@@ -94,4 +145,3 @@ SiteGenie is licensed under the MIT License. See `LICENSE` for more information.
 ## Contact
 
 For questions or feedback, feel free to open an issue or reach out directly via email at support@sitegenie.ai.
-
