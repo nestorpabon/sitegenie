@@ -101,13 +101,7 @@ Monitoring online reviews and ratings
 Addressing negative feedback
 Promoting positive brand mentions
 
-Agent #14: Paid Search and PPC Integration:
-
-Syncing SEO with PPC campaigns
-Keyword research for paid search
-Landing page optimization for PPC
-
-Agent #15: Emerging Trends and Technologies:
+Agent #14: Emerging Trends and Technologies:
 
 Staying updated with the latest SEO trends
 Implementing new technologies (e.g., AI, machine learning)
